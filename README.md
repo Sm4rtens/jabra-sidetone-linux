@@ -111,6 +111,19 @@ actually holds the microphone, rather than keeping the headset off-hook
 permanently. You pay the cost during calls, when you were going to pay it
 anyway, and never while you are just listening to music.
 
+**This only bites if you use the headset's own microphone.** If you take calls
+on a separate mic - a webcam or a desk mic - nothing ever asks the headset for
+bidirectional audio, so it stays in full-bandwidth playback the whole time and
+you will never see this at all. That is a perfectly reasonable setup: you give up
+the noise-cancelling boom, and you keep hi-fi playback during calls. Worth
+knowing before you conclude something is broken.
+
+The degradation is not visible from the host. USB playback stays 48 kHz stereo
+`S16_LE` in both states - `/proc/asound/card*/stream0` reports the same format
+throughout - so it happens downstream of the dongle, on the Bluetooth link
+itself. Confirmed by opening the mic with no HID call state sent at all: playback
+thins out on mic activity alone, independently of anything this tool does.
+
 ## Tested on
 
 Developed against a **Jabra Evolve2 65** paired through a **Jabra Link 380**
