@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Give a Jabra headset real call state on Linux.
+#
+# Watches PipeWire/PulseAudio for any application opening the headset mic, holds
+# the headset off-hook for the duration, and hangs up when the last one lets go.
+# Mic mute is mirrored to the headset's mute LED while a call is active.
+#
+# Call state is signalled only while an app actually holds the mic, on purpose:
+# a bidirectional Bluetooth link is speech-bandwidth, so playback sounds thin
+# during a call. That is inherent to the link and not something to work around,
+# which is why the headset is left alone the rest of the time.
+
+set -uo pipefail
+
+DEVICE_MATCH="${JABRA_DEVICE_MATCH:-Jabra}"
+CALL="${JABRA_CALL:-jabra-call}"
+PIN="${XDG_RUNTIME_DIR:-/tmp}/jabra-call.pin"
+STATE="${XDG_RUNTIME_DIR:-/tmp}/jabra-call.daemon"
+DEBOUNCE="${JABRA_DEBOUNCE:-0.4}"
+
+command -v "$CALL" >/dev/null 2>&1 || { echo "jabra-call-daemon: $CALL not on PATH" >&2; exit 1; }
+
+jabra_source() {
+  pactl list sources short 2>/dev/null \
+    | awk -v m="$DEVICE_MATCH" '$2 ~ m && $2 !~ /\.monitor$/ {print $1; exit}'
+}
+
+jabra_source_name() {
+  pactl list sources short 2>/dev/null \
+    | awk -v m="$DEVICE_MATCH" '$2 ~ m && $2 !~ /\.monitor$/ {print $2; exit}'
+}
+
+# How many recording streams currently hold the headset mic.
+mic_users() {
+  local idx
+  idx=$(jabra_source)
+  [[ -z ${idx:-} ]] && { echo 0; return; }
+  pactl -f json list source-outputs 2>/dev/null \
+    | jq --argjson i "$idx" '[ .[] | select(.source == $i) ] | length' 2>/dev/null \
+    || echo 0
+}
+
+muted() {
+  local name
+  name=$(jabra_source_name)
+  [[ -z ${name:-} ]] && { echo no; return; }
+  pactl get-source-mute "$name" 2>/dev/null | awk '{print $2}'
+}
+
+sync_state() {
+  local n want prev arg
+  n=$(mic_users)
+  [[ $n =~ ^[0-9]+$ ]] || return 0
+
+  # A manual override pins call state until the set of mic users next changes,
+  # so it lasts for the current call and no longer.
+  if [[ -f $PIN ]]; then
+    [[ "$(cat "$PIN" 2>/dev/null)" == "$n" ]] && return 0
+    rm -f "$PIN"
+  fi
+
+  if (( n > 0 )); then
+    [[ $(muted) == yes ]] && want=mute || want=unmute
+  else
+    want=stop
+  fi
+
+  prev=$(cat "$STATE" 2>/dev/null || echo stop)
+  [[ $want == "$prev" ]] && return 0
+
+  # Entering a call uses 'start'; transitions within one only track mute.
+  arg=$want
+  [[ $prev == stop && $want == unmute ]] && arg=start
+  JABRA_CALL_AUTO=1 "$CALL" "$arg" >/dev/null 2>&1 && echo "$want" > "$STATE"
+}
+
+# Never leave the headset stuck off-hook with a red light.
+cleanup() { JABRA_CALL_AUTO=1 "$CALL" stop >/dev/null 2>&1; rm -f "$STATE"; exit 0; }
+trap cleanup TERM INT
+
+sync_state
+pactl subscribe 2>/dev/null | while read -r ev; do
+  case $ev in
+    *"on source-output"*|*"on source"*) sleep "$DEBOUNCE"; sync_state ;;
+  esac
+done

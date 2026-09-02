@@ -1,0 +1,13 @@
+[Unit]
+Description=Jabra headset call state (firmware sidetone and busylight during calls)
+After=pipewire.service pipewire-pulse.service
+Wants=pipewire-pulse.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/jabra-call-daemon
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

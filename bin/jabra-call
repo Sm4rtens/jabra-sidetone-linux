@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Signal HID telephony call state to a Jabra headset.
+#
+# Jabra headsets gate firmware sidetone and the busylight on call state, which
+# travels over HID rather than over audio. On Windows, Jabra Direct sets the
+# Off-Hook bit when a softphone starts a call. Nothing on Linux does, so opening
+# the mic flips the dongle's Bluetooth link into call mode while the headset
+# itself is never told a call is happening: degraded audio, and no sidetone.
+#
+# The devices expose a standard HID Telephony output report:
+#
+#   05 0b  Usage Page (Telephony)    09 05  Usage (Headset)
+#   85 02    Report ID 2
+#   05 08    Usage Page (LED)
+#   09 17      Off-Hook   <- bit 0
+#   09 1e      Speaker    <- bit 1
+#   09 09      Mute       <- bit 2
+#   09 18      Ring       <- bit 3
+#   09 20      Hold       <- bit 4
+#   09 21      Microphone <- bit 5
+#   09 2a      On-Line    <- bit 6
+#   91 22    Output (Data,Var,Abs)
+#
+# So the report is three bytes: ID, flags, padding.
+
+set -euo pipefail
+
+VENDOR="0B0E"                                    # GN Netcom / Jabra
+STATEFILE="${XDG_RUNTIME_DIR:-/tmp}/jabra-call.state"
+PIN="${XDG_RUNTIME_DIR:-/tmp}/jabra-call.pin"
+DEVICE_MATCH="${JABRA_DEVICE_MATCH:-Jabra}"
+
+OFF_HOOK=$((1 << 0))
+MUTE=$((1 << 2))
+ON_LINE=$((1 << 6))
+
+# A Jabra device can expose several HID nodes, so match the one that actually
+# carries the Telephony/Headset collection rather than the first vendor hit.
+has_telephony() {
+  local desc="$1/device/report_descriptor"
+  [[ -r $desc ]] || return 1
+  od -An -tx1 -v "$desc" 2>/dev/null | tr -s ' \n' ' ' | grep -q ' 05 0b 09 05 '
+}
+
+find_dev() {
+  local d
+  for d in /sys/class/hidraw/hidraw*; do
+    [[ -r $d/device/uevent ]] || continue
+    grep -q "HID_ID=.*:0000${VENDOR}:" "$d/device/uevent" 2>/dev/null || continue
+    has_telephony "$d" || continue
+    echo "/dev/$(basename "$d")"
+    return 0
+  done
+  return 1
+}
+
+# A hand-driven call toggle pins state against jabra-call-daemon. The pin records
+# how many apps hold the mic; the daemon drops it as soon as that count changes,
+# so an override covers the call it was meant for and no longer.
+pin_manual() {
+  [[ -n ${JABRA_CALL_AUTO:-} ]] && return 0
+  local idx n
+  idx=$(pactl list sources short 2>/dev/null \
+        | awk -v m="$DEVICE_MATCH" '$2 ~ m && $2 !~ /\.monitor$/ {print $1; exit}')
+  n=$(pactl -f json list source-outputs 2>/dev/null \
+      | jq --argjson i "${idx:-0}" '[ .[] | select(.source == $i) ] | length' 2>/dev/null)
+  echo "${n:-0}" > "$PIN"
+}
+
+send() {
+  local flags=$1 dev hex
+  if ! dev=$(find_dev); then
+    echo "jabra-call: no Jabra HID telephony device found" >&2
+    exit 1
+  fi
+  if [[ ! -w $dev ]]; then
+    echo "jabra-call: $dev is not writable - install the udev rule (see README)" >&2
+    exit 1
+  fi
+  hex=$(printf '%02x' "$flags")
+  printf "\\x02\\x${hex}\\x00" > "$dev"
+  echo "$flags" > "$STATEFILE"
+}
+
+in_call() { [[ $(cat "$STATEFILE" 2>/dev/null || echo 0) -ne 0 ]]; }
+
+case "${1:-status}" in
+  start)  pin_manual; send $(( OFF_HOOK | ON_LINE )); echo "call state: ON (off-hook)" ;;
+  stop)   pin_manual; send 0;                        echo "call state: OFF (on-hook)" ;;
+  toggle) pin_manual
+          if in_call; then send 0; echo "call state: OFF (on-hook)"
+          else send $(( OFF_HOOK | ON_LINE )); echo "call state: ON (off-hook)"; fi ;;
+  mute)   send $(( OFF_HOOK | ON_LINE | MUTE )); echo "call state: ON, muted" ;;
+  unmute) send $(( OFF_HOOK | ON_LINE ));        echo "call state: ON, unmuted" ;;
+  status) echo "flags=$(cat "$STATEFILE" 2>/dev/null || echo 0) dev=$(find_dev || echo none)" ;;
+  *)      echo "usage: $(basename "$0") [start|stop|toggle|mute|unmute|status]" >&2; exit 2 ;;
+esac

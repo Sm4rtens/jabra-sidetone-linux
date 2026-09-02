@@ -1,0 +1,10 @@
+# Jabra / GN Netcom USB headsets and dongles (vendor 0b0e).
+#
+# Grant the actively logged-in user write access to the HID telephony interface.
+# Writing the Off-Hook bit tells the headset a call is in progress, which is what
+# engages its firmware sidetone and busylight. Nothing in the Linux stack sends
+# this signal on its own.
+#
+# uaccess grants access to whoever is logged in at the seat, rather than making
+# the device world-writable.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b0e", TAG+="uaccess"
