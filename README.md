@@ -56,7 +56,7 @@ for as long as any application has the microphone open.
 ## Install
 
 ```sh
-git clone https://github.com/YOUR_USER/jabra-sidetone-linux
+git clone https://github.com/Sm4rtens/jabra-sidetone-linux
 cd jabra-sidetone-linux
 ./install.sh
 ```
